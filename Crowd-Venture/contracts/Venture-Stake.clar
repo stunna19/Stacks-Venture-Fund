@@ -29,6 +29,10 @@
 (define-constant ERR-POOL-MERGER-FAILED (err u110))
 (define-constant ERR-IDENTICAL-POOL-MERGER (err u111))
 (define-constant ERR-STAKING-LOCK-PERIOD (err u112))
+(define-constant ERR-INVALID-REWARD-RATE (err u113))
+(define-constant ERR-INVALID-RECIPIENT (err u114))
+(define-constant ERR-INVALID-CATEGORY (err u115))
+(define-constant ERR-INVALID-IMAGE-URL (err u116))
 
 ;; Data Structures
 
@@ -138,6 +142,27 @@
     (map-get? investor-stakes { pool-id: pool-id, staker-address: staker-address })
 )
 
+;; Pool existence validation
+(define-read-only (validate-pool-exists (pool-id uint))
+    (let ((pool-record (get-pool-details pool-id)))
+        (and (is-some pool-record) (get is-active (default-to {total-capital: u0, is-active: false, pool-creator: contract-admin, creation-block: u0} pool-record)))
+    )
+)
+
+;; Validate investment category
+(define-read-only (validate-investment-category (category (string-utf8 64)))
+    (let ((category-length (len category)))
+        (and (> category-length u0) (<= category-length u64))
+    )
+)
+
+;; Validate image URL
+(define-read-only (validate-image-url (url (string-utf8 256)))
+    (let ((url-length (len url)))
+        (and (> url-length u0) (<= url-length u256))
+    )
+)
+
 ;; Calculate pending staking rewards
 (define-read-only (calculate-pending-rewards (pool-id uint))
     (let
@@ -218,7 +243,16 @@
         (asserts! (> (len pool-name) u0) ERR-INVALID-METADATA-FORMAT)
         (asserts! (> (len pool-description) u0) ERR-INVALID-METADATA-FORMAT)
         
-        ;; Store metadata
+        ;; Validate investment category
+        (asserts! (validate-investment-category investment-category) ERR-INVALID-CATEGORY)
+        
+        ;; Validate image URL
+        (asserts! (validate-image-url brand-image-url) ERR-INVALID-IMAGE-URL)
+        
+        ;; Validate pool exists
+        (asserts! (validate-pool-exists pool-id) ERR-POOL-DOES-NOT-EXIST)
+        
+        ;; Store metadata with validated inputs
         (ok (map-set pool-descriptive-data
             { pool-id: pool-id }
             {
@@ -247,8 +281,13 @@
         ;; Validate proposal requirements
         (asserts! (>= (get total-capital pool-record) proposal-funding-threshold) ERR-BELOW-FUNDING-THRESHOLD)
         (asserts! (<= requested-amount (get total-capital pool-record)) ERR-INSUFFICIENT-BALANCE)
+        (asserts! (validate-pool-exists pool-id) ERR-POOL-DOES-NOT-EXIST)
+        (asserts! (> (len proposal-description) u0) ERR-INVALID-METADATA-FORMAT)
+        
+        ;; Validate recipient address (simple check that it's not null/empty)
+        (asserts! (not (is-eq recipient-address 'SP000000000000000000002Q6VF78)) ERR-INVALID-RECIPIENT)
 
-        ;; Create proposal record
+        ;; Create proposal record with validated inputs
         (map-set investment-proposals
             { pool-id: pool-id, proposal-id: proposal-id }
             {
@@ -276,6 +315,7 @@
         ;; Check voting eligibility
         (asserts! (is-eq (get proposal-status proposal-record) u"active") ERR-VOTING-PERIOD-ENDED)
         (asserts! (is-none (get-investor-vote pool-id proposal-id tx-sender)) ERR-DUPLICATE-VOTE)
+        (asserts! (validate-pool-exists pool-id) ERR-POOL-DOES-NOT-EXIST)
 
         ;; Record this vote
         (map-set investor-votes
@@ -308,6 +348,7 @@
         ;; Validate proposal status
         (asserts! (is-eq (get proposal-status proposal-record) u"active") ERR-VOTING-PERIOD-ENDED)
         (asserts! (>= (- block-height (get submission-block proposal-record)) voting-duration-blocks) ERR-VOTING-PERIOD-ENDED)
+        (asserts! (validate-pool-exists pool-id) ERR-POOL-DOES-NOT-EXIST)
 
         ;; Determine and execute outcome
         (if (> (get support-votes proposal-record) (get opposition-votes proposal-record))
@@ -343,6 +384,8 @@
 (define-public (update-staking-reward-rate (new-rate uint))
     (begin
         (asserts! (is-eq tx-sender contract-admin) ERR-UNAUTHORIZED-ACCESS)
+        ;; Validate the new rate to be within reasonable bounds
+        (asserts! (and (>= new-rate u0) (<= new-rate u1000000)) ERR-INVALID-REWARD-RATE)
         (ok (var-set staking-reward-rate new-rate))
     )
 )
@@ -358,6 +401,7 @@
         (asserts! (get is-active pool-record) ERR-POOL-DOES-NOT-EXIST)
         (asserts! (<= stake-amount (get investment-amount investor-record)) ERR-INSUFFICIENT-BALANCE)
         (asserts! (> stake-amount u0) ERR-INVALID-CONTRIBUTION-AMOUNT)
+        (asserts! (validate-pool-exists pool-id) ERR-POOL-DOES-NOT-EXIST)
         
         ;; Process existing rewards if already staking
         (if (is-some existing-stake)
@@ -380,6 +424,9 @@
 (define-public (claim-staking-rewards (pool-id uint))
     (let
         ((stake-record (unwrap! (get-investor-stake pool-id tx-sender) ERR-NO-ACTIVE-STAKE)))
+        
+        ;; Validate pool exists
+        (asserts! (validate-pool-exists pool-id) ERR-POOL-DOES-NOT-EXIST)
 
         (let
             ((elapsed-blocks (- block-height (get last-reward-block stake-record)))
